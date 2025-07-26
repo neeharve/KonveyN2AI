@@ -5,6 +5,7 @@ This module provides server-side utilities for handling JSON-RPC requests,
 including method registration, request validation, error handling, and response formatting.
 """
 
+import asyncio
 import json
 import logging
 import traceback
@@ -205,16 +206,12 @@ class JsonRpcServer:
 
             # Call handler
             try:
-                if hasattr(handler, "__self__"):
-                    # Instance method
+                if asyncio.iscoroutinefunction(handler):
+                    # Async function or method
                     result = await handler(**handler_kwargs)
                 else:
-                    # Function
-                    result = (
-                        await handler(**handler_kwargs)
-                        if hasattr(handler, "__await__")
-                        else handler(**handler_kwargs)
-                    )
+                    # Sync function or method
+                    result = handler(**handler_kwargs)
 
                 # Handle notification requests (no id field)
                 if rpc_request.id is None:
