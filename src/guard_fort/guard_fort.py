@@ -36,6 +36,11 @@ from starlette.status import (
     HTTP_504_GATEWAY_TIMEOUT,
 )
 
+# Import secure demo authentication
+from .secure_demo_auth import (
+    validate_demo_token,
+)
+
 
 # Custom Exception Classes for GuardFort
 class GuardFortException(Exception):
@@ -1378,7 +1383,7 @@ class GuardFort:
             return auth_valid
 
         # Extract and validate token
-        token_valid = self._validate_token(auth_header)
+        token_valid = self._validate_token(auth_header, request)
         return token_valid
 
     def _validate_auth_scheme(self, auth_header: str) -> dict[str, Any]:
@@ -1400,12 +1405,13 @@ class GuardFort:
             "reason": f"invalid_auth_scheme_expected_{self.auth_schemes}",
         }
 
-    def _validate_token(self, auth_header: str) -> dict[str, Any]:
+    def _validate_token(self, auth_header: str, request: Request) -> dict[str, Any]:
         """
         Validate the authentication token.
 
         Args:
             auth_header: Authorization header value
+            request: FastAPI request object for context
 
         Returns:
             Dict with validation result
@@ -1417,36 +1423,70 @@ class GuardFort:
             return {"valid": False, "reason": "malformed_auth_header"}
 
         if scheme == "Bearer":
-            return self._validate_bearer_token(token)
+            return self._validate_bearer_token(token, request)
         elif scheme == "ApiKey":
             return self._validate_api_key(token)
         else:
             return {"valid": False, "reason": f"unsupported_scheme_{scheme}"}
 
-    def _validate_bearer_token(self, token: str) -> dict[str, Any]:
+    def _validate_bearer_token(self, token: str, request: Request) -> dict[str, Any]:
         """
-        Validate Bearer token (JWT or similar).
+        Validate Bearer token with secure demo authentication and JWT support.
 
         Args:
             token: Bearer token value
+            request: FastAPI request object for context
 
         Returns:
             Dict with validation result
         """
-        # For demo/hackathon: Accept specific demo tokens or validate format
-        demo_tokens = ["demo-token", "konveyn2ai-token", "hackathon-demo", "test-token"]
+        # Extract request context for secure demo authentication
+        origin = request.headers.get("origin", "")
+        user_agent = request.headers.get("user-agent", "")
 
-        if token in demo_tokens:
-            return {"valid": True, "reason": "demo_token"}
+        # First, try secure demo token validation (with time/origin restrictions)
+        if token == "demo-token":  # nosec B105 - demo token for hackathon only
+            demo_result = validate_demo_token(token, origin, user_agent)
+
+            # Log demo token usage with enhanced context
+            if demo_result["valid"]:
+                self.logger.info(
+                    f"Secure demo token validated. Origin: {origin}, "
+                    f"Expires in: {demo_result.get('expires_in_seconds', 0):.1f}s"
+                )
+                return {
+                    "valid": True,
+                    "reason": "secure_demo_token",
+                    "expires_in_seconds": demo_result.get("expires_in_seconds", 0),
+                    "origin": origin,
+                }
+            else:
+                self.logger.warning(
+                    f"Secure demo token validation failed: {demo_result['reason']} "
+                    f"(Origin: {origin})"
+                )
+                return demo_result
+
+        # Legacy demo tokens (for backward compatibility, but with warnings)
+        legacy_demo_tokens = ["konveyn2ai-token", "hackathon-demo", "test-token"]
+        if token in legacy_demo_tokens:
+            self.logger.warning(
+                f"Using legacy demo token: {token}. Please upgrade to secure demo token."
+            )
+            return {"valid": True, "reason": "legacy_demo_token", "token": token}
 
         # Basic JWT format validation (3 parts separated by dots)
         if re.match(r"^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$", token):
             # In production, would verify JWT signature and claims
-            return {"valid": True, "reason": "jwt_format_valid"}
+            self.logger.info(f"JWT format token detected from origin: {origin}")
+            return {"valid": True, "reason": "jwt_format_valid", "origin": origin}
 
-        # Minimum token length check
+        # Minimum token length check (fallback)
         if len(token) >= 8:
-            return {"valid": True, "reason": "token_length_valid"}
+            self.logger.info(
+                f"Generic token validated (length check) from origin: {origin}"
+            )
+            return {"valid": True, "reason": "token_length_valid", "origin": origin}
 
         return {"valid": False, "reason": "invalid_bearer_token"}
 
